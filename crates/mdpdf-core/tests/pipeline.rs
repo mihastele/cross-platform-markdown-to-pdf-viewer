@@ -38,7 +38,7 @@ fn links_images_refs_autolinks() {
     let doc = parse("[a](http://x.y \"t\") ![i](p.png) [r][k] <https://z.io> www.q.com.\n\n[k]: http://ref");
     let Block::Paragraph(p) = &doc.blocks[0] else { panic!() };
     assert!(matches!(&p[0], Inline::Link { url, .. } if url == "http://x.y"));
-    assert!(p.iter().any(|i| matches!(i, Inline::Image { url, alt } if url == "p.png" && alt == "i")));
+    assert!(p.iter().any(|i| matches!(i, Inline::Image { url, alt, .. } if url == "p.png" && alt == "i")));
     assert!(p.iter().any(|i| matches!(i, Inline::Link { url, .. } if url == "http://ref")));
     assert!(p.iter().any(|i| matches!(i, Inline::Link { url, .. } if url == "https://z.io")));
     assert!(p.iter().any(|i| matches!(i, Inline::Link { url, .. } if url == "http://www.q.com")));
@@ -115,5 +115,32 @@ fn continuous_mode_is_one_tall_page() {
 fn degenerate_inputs_do_not_panic() {
     for s in ["", "\n\n", "|", "|-|", "[", "![", "**", "`", "> ", "- ", "1.", "<", "&", "\\", "# ", "~~~", "[]()", "[a](", "***a**b*"] {
         let _ = markdown_to_pdf(s, &Config::a4());
+    }
+}
+
+/// The viewer lays out one endless page. Nothing may ever "break" it, and
+/// content must flow strictly downward (no overlapping sections).
+#[test]
+fn continuous_layout_flows_monotonically_for_every_feature() {
+    use mdpdf_core::{render, Source};
+    let ex = concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples");
+    for (file, designed) in [("showcase.md", false), ("showcase.md", true), ("designed.md", false), ("designed.md", true)] {
+        let src = std::fs::read_to_string(format!("{ex}/{file}")).unwrap();
+        let mut cfg = if designed { Config::designed_a4() } else { Config::a4() };
+        cfg.paginate = false;
+        cfg.page_numbers = false;
+        cfg.base_dir = Some(ex.into());
+        let lay = render(&src, Source::Markdown, &cfg).unwrap();
+        assert_eq!(lay.pages.len(), 1, "{file} designed={designed}: continuous layout must be a single page");
+        assert!(lay.height > cfg.page_height, "{file}: height {}", lay.height);
+        // Text baselines of consecutive headings must increase.
+        let ys: Vec<f32> = lay.headings.iter().map(|h| h.y).collect();
+        assert!(ys.windows(2).all(|w| w[0] < w[1]), "{file} designed={designed}: headings overlap: {ys:?}");
+        let max_y = lay.pages[0]
+            .ops
+            .iter()
+            .filter_map(|o| if let Op::Text { y, .. } = o { Some(*y) } else { None })
+            .fold(0.0, f32::max);
+        assert!(max_y < lay.height, "{file}: text below the page");
     }
 }

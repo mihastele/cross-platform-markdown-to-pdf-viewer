@@ -4,9 +4,17 @@
 //! "rule of 3"); `~~` strikethrough uses the same machinery.
 
 use crate::ast::{plain_text, Inline};
+use crate::css::Sheet;
+use crate::html::{self, Tag};
 use std::collections::HashMap;
 
 pub type Refs = HashMap<String, String>;
+
+/// Inline parsing context. `html` enables inline HTML tags (Designed mode).
+pub struct InlineCtx<'a> {
+    pub refs: &'a Refs,
+    pub html: Option<&'a Sheet>,
+}
 
 enum Tok {
     N(Inline),
@@ -17,9 +25,9 @@ pub fn normalize_label(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
 }
 
-pub fn parse_inlines(s: &str, refs: &Refs) -> Vec<Inline> {
+pub fn parse_inlines(s: &str, ctx: &InlineCtx) -> Vec<Inline> {
     let chars: Vec<char> = s.chars().collect();
-    inline(&chars, refs)
+    inline(&chars, ctx)
 }
 
 fn is_punct(c: char) -> bool {
@@ -32,7 +40,7 @@ fn flush(buf: &mut String, toks: &mut Vec<Tok>) {
     }
 }
 
-fn inline(c: &[char], refs: &Refs) -> Vec<Inline> {
+fn inline(c: &[char], ctx: &InlineCtx) -> Vec<Inline> {
     let mut toks: Vec<Tok> = Vec::new();
     let mut buf = String::new();
     let mut i = 0;
@@ -127,12 +135,12 @@ fn inline(c: &[char], refs: &Refs) -> Vec<Inline> {
                     continue;
                 }
                 let open = if is_img { i + 1 } else { i };
-                match try_link(c, open, refs) {
-                    Some((url, label, end)) => {
+                match try_link(c, open, ctx.refs) {
+                    Some((url, title, label, end)) => {
                         flush(&mut buf, &mut toks);
-                        let content = inline(label, refs);
+                        let content = inline(label, ctx);
                         toks.push(Tok::N(if is_img {
-                            Inline::Image { url, alt: plain_text(&content) }
+                            Inline::Image { url, alt: plain_text(&content), title, width: None, height: None }
                         } else {
                             Inline::Link { url, content }
                         }));
@@ -145,6 +153,37 @@ fn inline(c: &[char], refs: &Refs) -> Vec<Inline> {
                 }
             }
             '<' => {
+                if let Some(sheet) = ctx.html {
+                    if let Some((tag, n)) = html::parse_tag(&c[i..]) {
+                        match tag {
+                            Tag::Comment | Tag::Close(_) => {}
+                            Tag::Open { name, attrs, self_close } => match name.as_str() {
+                                "br" => {
+                                    flush(&mut buf, &mut toks);
+                                    toks.push(Tok::N(Inline::HardBreak));
+                                }
+                                "img" => {
+                                    flush(&mut buf, &mut toks);
+                                    toks.push(Tok::N(html::inline_img(&attrs, sheet)));
+                                }
+                                _ if self_close => {}
+                                _ => {
+                                    if let Some((close_at, close_len)) = find_close(c, i + n, &name) {
+                                        flush(&mut buf, &mut toks);
+                                        let inner = inline(&c[i + n..close_at], ctx);
+                                        for node in html::inline_tag(&name, &attrs, inner, sheet) {
+                                            toks.push(Tok::N(node));
+                                        }
+                                        i = close_at + close_len;
+                                        continue;
+                                    }
+                                }
+                            },
+                        }
+                        i += n;
+                        continue;
+                    }
+                }
                 if let Some(end) = c[i..].iter().position(|&x| x == '>').map(|p| i + p) {
                     let inner: String = c[i + 1..end].iter().collect();
                     let low = inner.to_ascii_lowercase();
@@ -349,28 +388,48 @@ fn is_autolink(s: &str) -> bool {
     s.contains('@') && s.contains('.') && !s.starts_with('@')
 }
 
-fn entity(c: &[char]) -> Option<(String, usize)> {
+pub(crate) fn entity(c: &[char]) -> Option<(String, usize)> {
     let semi = c.iter().take(12).position(|&x| x == ';')?;
     let name: String = c[1..semi].iter().collect();
-    let s = match name.as_str() {
-        "amp" => "&".to_string(),
-        "lt" => "<".to_string(),
-        "gt" => ">".to_string(),
-        "quot" => "\"".to_string(),
-        "apos" => "'".to_string(),
-        "nbsp" => "\u{a0}".to_string(),
-        "copy" => "\u{a9}".to_string(),
-        "reg" => "\u{ae}".to_string(),
-        "mdash" => "\u{2014}".to_string(),
-        "ndash" => "\u{2013}".to_string(),
-        "hellip" => "\u{2026}".to_string(),
-        n if n.starts_with("#x") || n.starts_with("#X") => {
-            char::from_u32(u32::from_str_radix(&n[2..], 16).ok()?)?.to_string()
-        }
-        n if n.starts_with('#') => char::from_u32(n[1..].parse().ok()?)?.to_string(),
+    let ch = match name.as_str() {
+        "amp" => '&', "lt" => '<', "gt" => '>', "quot" => '"', "apos" => '\'', "nbsp" => '\u{a0}',
+        "copy" => '\u{a9}', "reg" => '\u{ae}', "trade" => '\u{2122}', "mdash" => '\u{2014}', "ndash" => '\u{2013}',
+        "hellip" => '\u{2026}', "lsquo" => '\u{2018}', "rsquo" => '\u{2019}', "ldquo" => '\u{201c}', "rdquo" => '\u{201d}',
+        "bull" => '\u{2022}', "middot" => '\u{b7}', "times" => '\u{d7}', "divide" => '\u{f7}', "deg" => '\u{b0}',
+        "plusmn" => '\u{b1}', "frac12" => '\u{bd}', "frac14" => '\u{bc}', "laquo" => '\u{ab}', "raquo" => '\u{bb}',
+        "euro" => '\u{20ac}', "pound" => '\u{a3}', "yen" => '\u{a5}', "cent" => '\u{a2}', "sect" => '\u{a7}',
+        "para" => '\u{b6}', "rarr" => '\u{2192}', "larr" => '\u{2190}', "harr" => '\u{2194}', "check" => '\u{2713}',
+        n if n.starts_with("#x") || n.starts_with("#X") => char::from_u32(u32::from_str_radix(&n[2..], 16).ok()?)?,
+        n if n.starts_with('#') => char::from_u32(n[1..].parse().ok()?)?,
         _ => return None,
     };
-    Some((s, semi + 1))
+    Some((ch.to_string(), semi + 1))
+}
+
+/// Finds the closing `</name>` for an element whose content starts at `from`.
+fn find_close(c: &[char], from: usize, name: &str) -> Option<(usize, usize)> {
+    let mut depth = 1;
+    let mut i = from;
+    while i < c.len() {
+        if c[i] == '<' {
+            if let Some((tag, n)) = html::parse_tag(&c[i..]) {
+                match tag {
+                    Tag::Open { name: o, self_close: false, .. } if o == name => depth += 1,
+                    Tag::Close(cn) if cn == name => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return Some((i, n));
+                        }
+                    }
+                    _ => {}
+                }
+                i += n;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    None
 }
 
 /// Finds the `]` matching the `[` at `open`, skipping escapes and code spans.
@@ -404,7 +463,7 @@ fn matching_bracket(c: &[char], open: usize) -> Option<usize> {
 
 /// Tries to parse a link starting at the `[` at `open`.
 /// Returns (url, label slice, index just past the construct).
-fn try_link<'a>(c: &'a [char], open: usize, refs: &Refs) -> Option<(String, &'a [char], usize)> {
+fn try_link<'a>(c: &'a [char], open: usize, refs: &Refs) -> Option<(String, Option<String>, &'a [char], usize)> {
     let close = matching_bracket(c, open)?;
     let label = &c[open + 1..close];
     match c.get(close + 1) {
@@ -451,13 +510,16 @@ fn try_link<'a>(c: &'a [char], open: usize, refs: &Refs) -> Option<(String, &'a 
             while i < c.len() && c[i].is_whitespace() {
                 i += 1;
             }
+            let mut title = None;
             if let Some(&q) = c.get(i) {
                 if q == '"' || q == '\'' || q == '(' {
                     let endq = if q == '(' { ')' } else { q };
                     i += 1;
+                    let ts = i;
                     while i < c.len() && c[i] != endq {
                         i += 1;
                     }
+                    title = Some(c[ts..i.min(c.len())].iter().collect::<String>());
                     i += 1;
                     while i < c.len() && c[i].is_whitespace() {
                         i += 1;
@@ -465,7 +527,7 @@ fn try_link<'a>(c: &'a [char], open: usize, refs: &Refs) -> Option<(String, &'a 
                 }
             }
             if c.get(i) == Some(&')') {
-                Some((url, label, i + 1))
+                Some((url, title, label, i + 1))
             } else {
                 None
             }
@@ -474,11 +536,11 @@ fn try_link<'a>(c: &'a [char], open: usize, refs: &Refs) -> Option<(String, &'a 
             let end = c[close + 2..].iter().position(|&x| x == ']')? + close + 2;
             let key: String = c[close + 2..end].iter().collect();
             let key = if key.trim().is_empty() { label.iter().collect() } else { key };
-            refs.get(&normalize_label(&key)).map(|u| (u.clone(), label, end + 1))
+            refs.get(&normalize_label(&key)).map(|u| (u.clone(), None, label, end + 1))
         }
         _ => {
             let key: String = label.iter().collect();
-            refs.get(&normalize_label(&key)).map(|u| (u.clone(), label, close + 1))
+            refs.get(&normalize_label(&key)).map(|u| (u.clone(), None, label, close + 1))
         }
     }
 }

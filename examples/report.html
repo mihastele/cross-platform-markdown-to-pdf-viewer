@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Annual Design Review</title>
+<style>
+:root { --brand: #7c3aed; --ink: #1f2937; }
+body { background: #ffffff; color: var(--ink); }
+h1 { color: var(--brand); }
+.card { background: #f5f3ff; border: 1px solid #ddd6fe; padding: 12px; margin-top: 8px; margin-bottom: 8px; }
+.card h3 { color: var(--brand); }
+.pill { background: var(--brand); color: white; font-size: 8pt; }
+.right { text-align: right; color: #6b7280; }
+.center { text-align: center; }
+table.data th { color: #ffffff; }
+</style></head>
+<body>
+<div class="center"><h1>Annual Design Review</h1>
+<p class="muted center">Prepared by the Design Systems team &mdash; <span class="pill"> FY26 </span></p></div>
+<p class="right">Confidential &bull; Internal</p>
+<hr>
+<h2>Highlights</h2>
+<div class="card"><h3>Component library</h3>
+<p>We shipped <strong>42 components</strong>, with <em>full accessibility coverage</em>, and retired 17 legacy patterns.</p></div>
+<div class="card"><h3>Design tokens</h3>
+<p>Tokens now drive colour, spacing and type across web, iOS and Android.
+Read the <a href="https://example.com/tokens">token guide</a>.</p>
+<ul><li>Colour: 64 tokens</li><li>Spacing: 12 steps</li><li>Type: 9 styles</li></ul></div>
+<h2>Adoption</h2>
+<table class="data"><caption>Table 1. Adoption by product area</caption>
+<thead><tr><th>Area</th><th align="right">Teams</th><th align="right">Adoption</th></tr></thead>
+<tbody>
+<tr><td>Web app</td><td align="right">14</td><td align="right">92%</td></tr>
+<tr><td>Mobile</td><td align="right">9</td><td align="right">74%</td></tr>
+<tr><td>Marketing</td><td align="right">5</td><td align="right">58%</td></tr>
+<tr><td colspan="2">Internal tools</td><td align="right">31%</td></tr>
+</tbody></table>
+<h2>Roadmap</h2>
+<ol><li>Dark mode for all components</li><li>Motion guidelines</li><li>Figma &harr; code sync</li></ol>
+<blockquote>Good design is as little design as possible. &mdash; Dieter Rams</blockquote>
+<pre><code class="language-css">.button { padding: 8px 16px; border-radius: 6px; }</code></pre>
+<p style="page-break-before: always">Closing notes start on a new page. <img src="assets/photo.jpg" width="320" alt="photo"></p>
+<dl><dt>Token</dt><dd>A named design decision.</dd><dt>Component</dt><dd>A reusable UI building block.</dd></dl>
+</body></html>

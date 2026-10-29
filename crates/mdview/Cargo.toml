@@ -8,4 +8,5 @@ license.workspace = true
 [dependencies]
 mdpdf-core = { path = "../mdpdf-core" }
 eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts", "x11", "wayland"] }
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
 rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "async-std"] }

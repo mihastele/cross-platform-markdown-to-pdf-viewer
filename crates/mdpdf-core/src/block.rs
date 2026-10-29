@@ -2,15 +2,145 @@
 //! lists (nested, task lists), GFM tables, rules, reference definitions.
 
 use crate::ast::*;
-use crate::inline::{normalize_label, parse_inlines, Refs};
+use crate::css::Sheet;
+use crate::html;
+use crate::inline::{normalize_label, parse_inlines, InlineCtx, Refs};
 
-/// Parses Markdown source into a [`Document`].
+/// Extensions beyond plain Markdown ("Designed" mode).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ParseOptions {
+    /// Embedded HTML blocks/inline tags and `<style>` rules.
+    pub html: bool,
+    /// GitHub-style `> [!NOTE]` callouts.
+    pub callouts: bool,
+}
+
+struct Ctx<'a> {
+    refs: &'a Refs,
+    sheet: Option<&'a Sheet>,
+    callouts: bool,
+}
+
+impl Ctx<'_> {
+    fn inl(&self, s: &str) -> Vec<Inline> {
+        parse_inlines(s, &InlineCtx { refs: self.refs, html: self.sheet })
+    }
+}
+
+/// Parses plain Markdown (no HTML, no callouts) into a [`Document`].
 pub fn parse(src: &str) -> Document {
+    parse_with(src, &ParseOptions::default())
+}
+
+pub fn parse_with(src: &str, opts: &ParseOptions) -> Document {
     let text = src.replace("\r\n", "\n").replace('\r', "\n").replace('\t', "    ");
     let text = text.strip_prefix('\u{feff}').unwrap_or(&text).to_string();
     let lines: Vec<String> = text.split('\n').map(str::to_string).collect();
     let refs = collect_refs(&lines);
-    Document { blocks: parse_blocks(&lines, &refs) }
+    let sheet = opts.html.then(|| Sheet::parse(&html::extract_styles(&text)));
+    let ctx = Ctx { refs: &refs, sheet: sheet.as_ref(), callouts: opts.callouts };
+    let blocks = parse_blocks(&lines, &ctx);
+    let title = blocks.iter().find_map(|b| match b {
+        Block::Heading { level: 1, content } => Some(plain_text(content)),
+        _ => None,
+    });
+    Document { blocks, title, page_bg: None }
+}
+
+const HTML_BLOCK_TAGS: &[&str] = &[
+    "address", "article", "aside", "blockquote", "body", "center", "dd", "details", "dialog", "dir", "div", "dl", "dt",
+    "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6", "header", "hgroup", "hr",
+    "html", "li", "main", "menu", "nav", "ol", "p", "section", "summary", "table", "tbody", "thead", "tfoot", "tr", "td",
+    "th", "caption", "ul", "picture",
+];
+const HTML_RAW_TAGS: &[&str] = &["pre", "script", "style", "svg", "video", "iframe"];
+
+enum HtmlEnd {
+    Blank,
+    Comment,
+    Close(String),
+}
+
+fn html_start(l: &str) -> Option<HtmlEnd> {
+    if indent(l) > 3 {
+        return None;
+    }
+    let t = l.trim_start();
+    if t.starts_with("<!--") {
+        return Some(HtmlEnd::Comment);
+    }
+    let rest = t.strip_prefix('<')?;
+    let (closing, rest) = match rest.strip_prefix('/') {
+        Some(r) => (true, r),
+        None => (false, rest),
+    };
+    let name: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric()).collect::<String>().to_ascii_lowercase();
+    let after = rest[name.len()..].chars().next();
+    if name.is_empty() || !matches!(after, None | Some(' ') | Some('>') | Some('/')) {
+        return None;
+    }
+    if !closing && HTML_RAW_TAGS.contains(&name.as_str()) {
+        return Some(HtmlEnd::Close(name));
+    }
+    HTML_BLOCK_TAGS.contains(&name.as_str()).then_some(HtmlEnd::Blank)
+}
+
+/// Matches `HtmlOpen`/`HtmlClose` markers into `Div`s.
+fn fold_markers(blocks: Vec<Block>) -> Vec<Block> {
+    if !blocks.iter().any(|b| matches!(b, Block::HtmlOpen { .. } | Block::HtmlClose { .. })) {
+        return blocks;
+    }
+    let mut stack: Vec<(String, BoxStyle, Vec<Block>)> = vec![(String::new(), BoxStyle::default(), Vec::new())];
+    let pop = |stack: &mut Vec<(String, BoxStyle, Vec<Block>)>| {
+        let (_, style, kids) = stack.pop().unwrap();
+        stack.last_mut().unwrap().2.push(Block::Div { style, blocks: kids });
+    };
+    for b in blocks {
+        match b {
+            Block::HtmlOpen { tag, style } => stack.push((tag, style, Vec::new())),
+            Block::HtmlClose { tag } => {
+                if let Some(pos) = stack.iter().rposition(|(t, _, _)| *t == tag) {
+                    if pos > 0 {
+                        while stack.len() > pos + 1 {
+                            pop(&mut stack);
+                        }
+                        pop(&mut stack);
+                    }
+                }
+            }
+            other => stack.last_mut().unwrap().2.push(other),
+        }
+    }
+    while stack.len() > 1 {
+        pop(&mut stack);
+    }
+    stack.pop().unwrap().2
+}
+
+fn detect_callout(blocks: &mut Vec<Block>) -> Option<CalloutKind> {
+    let Some(Block::Paragraph(p)) = blocks.first_mut() else { return None };
+    let Some(Inline::Text(t)) = p.first_mut() else { return None };
+    let rest = t.strip_prefix("[!")?;
+    let end = rest.find(']')?;
+    let kind = match rest[..end].to_ascii_uppercase().as_str() {
+        "NOTE" => CalloutKind::Note,
+        "TIP" => CalloutKind::Tip,
+        "IMPORTANT" => CalloutKind::Important,
+        "WARNING" => CalloutKind::Warning,
+        "CAUTION" => CalloutKind::Caution,
+        _ => return None,
+    };
+    *t = rest[end + 1..].trim_start().to_string();
+    if t.is_empty() {
+        p.remove(0);
+    }
+    while matches!(p.first(), Some(Inline::SoftBreak | Inline::HardBreak)) {
+        p.remove(0);
+    }
+    if p.is_empty() {
+        blocks.remove(0);
+    }
+    Some(kind)
 }
 
 fn collect_refs(lines: &[String]) -> Refs {
@@ -229,15 +359,16 @@ fn split_row(l: &str) -> Vec<String> {
 }
 
 /// True if `l` would start a new block that can interrupt a paragraph.
-fn interrupts_paragraph(l: &str) -> bool {
-    atx(l).is_some()
+fn interrupts_paragraph(l: &str, html: bool) -> bool {
+    (html && html_start(l).is_some_and(|e| !matches!(e, HtmlEnd::Comment)))
+        || atx(l).is_some()
         || fence_open(l).is_some()
         || is_hr(l)
         || (indent(l) <= 3 && l.trim_start().starts_with('>'))
         || list_marker(l).is_some_and(|m| !m.empty && (!m.ordered || m.start == 1))
 }
 
-fn parse_blocks(lines: &[String], refs: &Refs) -> Vec<Block> {
+fn parse_blocks(lines: &[String], ctx: &Ctx) -> Vec<Block> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < lines.len() {
@@ -276,8 +407,46 @@ fn parse_blocks(lines: &[String], refs: &Refs) -> Vec<Block> {
             out.push(Block::CodeBlock { lang: String::new(), text: body.join("\n") });
             continue;
         }
+        if let (Some(sheet), Some(end)) = (ctx.sheet, html_start(line)) {
+            let mut raw = Vec::new();
+            match end {
+                HtmlEnd::Blank => {
+                    while i < lines.len() && !blank(&lines[i]) {
+                        raw.push(lines[i].as_str());
+                        i += 1;
+                    }
+                }
+                HtmlEnd::Comment => {
+                    while i < lines.len() {
+                        raw.push(lines[i].as_str());
+                        i += 1;
+                        if raw.last().is_some_and(|l| l.contains("-->")) {
+                            break;
+                        }
+                    }
+                }
+                HtmlEnd::Close(name) => {
+                    let close = format!("</{name}");
+                    while i < lines.len() {
+                        raw.push(lines[i].as_str());
+                        i += 1;
+                        if raw.last().is_some_and(|l| l.to_ascii_lowercase().contains(&close)) {
+                            break;
+                        }
+                    }
+                }
+            }
+            let text = raw.join("\n");
+            let squashed: String = text.chars().filter(|c| !c.is_whitespace()).collect::<String>().to_ascii_lowercase();
+            if squashed == "<!--pagebreak-->" || squashed == "<!--page-break-->" || squashed == "<!--newpage-->" {
+                out.push(Block::PageBreak);
+            } else {
+                out.extend(html::parse_fragment(&text, sheet));
+            }
+            continue;
+        }
         if let Some((level, body)) = atx(line) {
-            out.push(Block::Heading { level, content: parse_inlines(&body, refs) });
+            out.push(Block::Heading { level, content: ctx.inl(&body) });
             i += 1;
             continue;
         }
@@ -296,7 +465,7 @@ fn parse_blocks(lines: &[String], refs: &Refs) -> Vec<Block> {
                     inner.push(r.strip_prefix(' ').unwrap_or(r).to_string());
                 } else if !blank(l)
                     && inner.last().is_some_and(|p: &String| !p.trim().is_empty())
-                    && !interrupts_paragraph(l)
+                    && !interrupts_paragraph(l, ctx.sheet.is_some())
                 {
                     inner.push(l.clone());
                 } else {
@@ -304,11 +473,15 @@ fn parse_blocks(lines: &[String], refs: &Refs) -> Vec<Block> {
                 }
                 i += 1;
             }
-            out.push(Block::Quote(parse_blocks(&inner, refs)));
+            let mut kids = parse_blocks(&inner, ctx);
+            match ctx.callouts.then(|| detect_callout(&mut kids)).flatten() {
+                Some(kind) => out.push(Block::Callout { kind, blocks: kids }),
+                None => out.push(Block::Quote(kids)),
+            }
             continue;
         }
         if let Some(m) = list_marker(line) {
-            let (b, ni) = parse_list(lines, i, m, refs);
+            let (b, ni) = parse_list(lines, i, m, ctx);
             out.push(b);
             i = ni;
             continue;
@@ -321,16 +494,17 @@ fn parse_blocks(lines: &[String], refs: &Refs) -> Vec<Block> {
                     let cols = aligns.len();
                     let mut rows = Vec::new();
                     i += 2;
-                    while i < lines.len() && !blank(&lines[i]) && !interrupts_paragraph(&lines[i]) {
+                    while i < lines.len() && !blank(&lines[i]) && !interrupts_paragraph(&lines[i], ctx.sheet.is_some()) {
                         let mut cells = split_row(&lines[i]);
                         cells.resize(cols, String::new());
-                        rows.push(cells.iter().map(|c| parse_inlines(c, refs)).collect());
+                        rows.push(cells.iter().map(|c| ctx.inl(c)).collect());
                         i += 1;
                     }
                     out.push(Block::Table {
                         aligns,
-                        header: header.iter().map(|c| parse_inlines(c, refs)).collect(),
+                        header: header.iter().map(|c| ctx.inl(c)).collect(),
                         rows,
+                        caption: None,
                     });
                     continue;
                 }
@@ -355,23 +529,26 @@ fn parse_blocks(lines: &[String], refs: &Refs) -> Vec<Block> {
                 i += 1;
                 break;
             }
-            if interrupts_paragraph(l) {
+            if interrupts_paragraph(l, ctx.sheet.is_some()) {
                 break;
             }
             para.push(l.trim_start());
             i += 1;
         }
         let text = para.join("\n").trim_end().to_string();
-        let content = parse_inlines(&text, refs);
+        let content = ctx.inl(&text);
         out.push(match setext {
             Some(level) => Block::Heading { level, content },
             None => Block::Paragraph(content),
         });
     }
+    if ctx.sheet.is_some() {
+        return fold_markers(out);
+    }
     out
 }
 
-fn parse_list(lines: &[String], mut i: usize, first: Marker, refs: &Refs) -> (Block, usize) {
+fn parse_list(lines: &[String], mut i: usize, first: Marker, ctx: &Ctx) -> (Block, usize) {
     let mut items = Vec::new();
     let mut tight = true;
     loop {
@@ -398,7 +575,7 @@ fn parse_list(lines: &[String], mut i: usize, first: Marker, refs: &Refs) -> (Bl
                 i += 1;
             } else if body.last().is_some_and(|p| !p.trim().is_empty())
                 && list_marker(l).is_none()
-                && !interrupts_paragraph(l)
+                && !interrupts_paragraph(l, ctx.sheet.is_some())
                 && !is_hr(l)
             {
                 body.push(l.trim_start().to_string());
@@ -410,7 +587,7 @@ fn parse_list(lines: &[String], mut i: usize, first: Marker, refs: &Refs) -> (Bl
         while body.last().is_some_and(|l| l.trim().is_empty()) {
             body.pop();
         }
-        let mut blocks = parse_blocks(&body, refs);
+        let mut blocks = parse_blocks(&body, ctx);
         let mut checked = None;
         if let Some(Block::Paragraph(p)) = blocks.first_mut() {
             if let Some(Inline::Text(t)) = p.first_mut() {

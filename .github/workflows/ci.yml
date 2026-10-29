@@ -20,3 +20,7 @@ jobs:
         run: cargo build --release -p mdview
       - name: Smoke test PDF export
         run: cargo run --release -p mdpdf -- examples/showcase.md -o showcase.pdf
+      - name: Smoke test Designed mode
+        run: |
+          cargo run --release -p mdpdf -- --mode designed examples/designed.md -o designed.pdf
+          cargo run --release -p mdpdf -- --mode designed examples/report.html -o report.pdf

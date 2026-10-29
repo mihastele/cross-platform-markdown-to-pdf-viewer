@@ -1,7 +1,9 @@
 //! Minimal PDF 1.4 writer: base-14 fonts, vector drawing, link annotations,
 //! document info and a nested bookmark outline. No compression, no deps.
 
+use crate::deflate::zlib_compress;
 use crate::fonts::winansi;
+use crate::image::{ImageData, Pixels};
 use crate::layout::{Color, Layout, Op};
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -151,10 +153,56 @@ fn content_stream(page_h: f32, bg: Option<Color>, w: f32, ops: &[Op]) -> Vec<u8>
                     let _ = writeln!(Str(&mut s), "{} {} w {} S", rg(*color, true), num(*width), path);
                 }
             }
+            Op::Image { x, y, w, h, img } => {
+                let _ = writeln!(Str(&mut s), "q {} 0 0 {} {} {} cm /Im{} Do Q", num(*w), num(*h), num(*x), num(fy(*y + *h)), img);
+            }
             Op::Link { .. } => {}
         }
     }
     s
+}
+
+/// A stream object: `dict` holds extra dictionary entries.
+fn stream_obj(dict: &str, data: &[u8], compress: bool) -> Vec<u8> {
+    let packed;
+    let (filter, bytes) = if compress {
+        packed = zlib_compress(data);
+        (" /Filter /FlateDecode", &packed[..])
+    } else {
+        ("", data)
+    };
+    let mut body = format!("<< {}{} /Length {} >>\nstream\n", dict, filter, bytes.len()).into_bytes();
+    body.extend_from_slice(bytes);
+    body.extend_from_slice(b"\nendstream");
+    body
+}
+
+fn write_image(o: &mut Objects, im: &ImageData) -> usize {
+    let id = o.alloc();
+    let base = format!("/Type /XObject /Subtype /Image /Width {} /Height {} /BitsPerComponent 8", im.width, im.height);
+    match &im.pixels {
+        Pixels::Raw { rgb, alpha } => {
+            let mut dict = format!("{base} /ColorSpace /DeviceRGB");
+            if let Some(a) = alpha {
+                let mid = o.alloc();
+                let d = format!("/Type /XObject /Subtype /Image /Width {} /Height {} /BitsPerComponent 8 /ColorSpace /DeviceGray", im.width, im.height);
+                o.set(mid, stream_obj(&d, a, true));
+                let _ = write!(dict, " /SMask {} 0 R", mid);
+            }
+            o.set(id, stream_obj(&dict, rgb, true));
+        }
+        Pixels::Jpeg { data, components, inverted_cmyk } => {
+            let cs = match components {
+                1 => "/DeviceGray",
+                4 => "/DeviceCMYK",
+                _ => "/DeviceRGB",
+            };
+            let decode = if *inverted_cmyk { " /Decode [1 0 1 0 1 0 1 0]" } else { "" };
+            let dict = format!("{base} /ColorSpace {cs}{decode} /Filter /DCTDecode");
+            o.set(id, stream_obj(&dict, data, false));
+        }
+    }
+    id
 }
 
 /// Adapter so `write!` can target a byte vector.
@@ -197,6 +245,8 @@ pub fn write_pdf(layout: &Layout) -> Vec<u8> {
     }
     let font_res: String = font_ids.iter().map(|(i, id)| format!("/F{} {} 0 R ", i, id)).collect();
 
+    let image_ids: Vec<usize> = layout.images.iter().map(|im| write_image(&mut o, im)).collect();
+
     let white = Color::rgb(255, 255, 255);
     let bg = (layout.background != white).then_some(layout.background);
 
@@ -205,10 +255,18 @@ pub fn write_pdf(layout: &Layout) -> Vec<u8> {
         let pid = o.alloc();
         let cid = o.alloc();
         let stream = content_stream(layout.height, bg, layout.width, &page.ops);
-        let mut body = format!("<< /Length {} >>\nstream\n", stream.len()).into_bytes();
-        body.extend(stream);
-        body.extend_from_slice(b"\nendstream");
-        o.set(cid, body);
+        o.set(cid, stream_obj("", &stream, true));
+        let xobjs: String = page
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::Image { img, .. } => Some(*img),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .map(|i| format!("/Im{} {} 0 R ", i, image_ids[i]))
+            .collect();
 
         let mut annots = String::new();
         for op in &page.ops {
@@ -231,8 +289,8 @@ pub fn write_pdf(layout: &Layout) -> Vec<u8> {
         o.set(
             pid,
             format!(
-                "<< /Type /Page /Parent {} 0 R /MediaBox [0 0 {} {}] /Resources << /Font << {}>> >> /Contents {} 0 R /Annots [{}] >>",
-                pages_id, num(layout.width), num(layout.height), font_res, cid, annots
+                "<< /Type /Page /Parent {} 0 R /MediaBox [0 0 {} {}] /Resources << /Font << {}>> /XObject << {}>> >> /Contents {} 0 R /Annots [{}] >>",
+                pages_id, num(layout.width), num(layout.height), font_res, xobjs, cid, annots
             )
             .into_bytes(),
         );

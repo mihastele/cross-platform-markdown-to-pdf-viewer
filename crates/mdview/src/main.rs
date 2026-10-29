@@ -4,7 +4,9 @@
 mod fonts;
 
 use eframe::egui::{self, Color32, FontId, Key, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
-use mdpdf_core::{layout, markdown_to_pdf, parse, Config, Document, Family, Layout, Op, Theme};
+use mdpdf_core::image::Pixels;
+use mdpdf_core::{convert, layout, parse, render, Config, Family, Layout, Mode, Op, Source, Theme};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -14,9 +16,11 @@ struct App {
     path: Option<PathBuf>,
     src: String,
     mtime: Option<SystemTime>,
-    doc: Document,
+    kind: Source,
+    mode: Mode,
+    textures: HashMap<u64, Option<egui::TextureHandle>>,
     rev: u64,
-    cache: Option<((i32, bool, bool, u64), Layout)>,
+    cache: Option<((i32, bool, bool, u64, Mode), Layout)>,
     zoom: f32,
     dark: bool,
     serif: bool,
@@ -28,14 +32,16 @@ struct App {
 }
 
 impl App {
-    fn new(cc: &eframe::CreationContext<'_>, path: Option<PathBuf>) -> Self {
+    fn new(cc: &eframe::CreationContext<'_>, path: Option<PathBuf>, mode: Mode) -> Self {
         let fonts = fonts::install(&cc.egui_ctx);
         cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
         let mut app = App {
             path: None,
             src: WELCOME.to_string(),
             mtime: None,
-            doc: parse(WELCOME),
+            kind: Source::Markdown,
+            mode,
+            textures: HashMap::new(),
             rev: 0,
             cache: None,
             zoom: 1.0,
@@ -57,7 +63,11 @@ impl App {
         match std::fs::read_to_string(&path) {
             Ok(s) => {
                 self.mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
-                self.doc = parse(&s);
+                self.kind = if matches!(path.extension().and_then(|e| e.to_str()), Some("html" | "htm" | "xhtml")) {
+                    Source::Html
+                } else {
+                    Source::Markdown
+                };
                 self.src = s;
                 self.rev += 1;
                 self.status = format!("Loaded {}", path.display());
@@ -81,7 +91,7 @@ impl App {
     }
 
     fn open_dialog(&mut self) {
-        if let Some(p) = rfd::FileDialog::new().add_filter("Markdown", &["md", "markdown", "txt"]).pick_file() {
+        if let Some(p) = rfd::FileDialog::new().add_filter("Markdown / HTML", &["md", "markdown", "txt", "html", "htm"]).pick_file() {
             self.load(p);
             self.scroll_to = Some(0.0);
         }
@@ -96,28 +106,86 @@ impl App {
         let Some(out) = rfd::FileDialog::new().add_filter("PDF", &["pdf"]).set_file_name(default).save_file() else {
             return;
         };
-        let mut cfg = Config::a4();
+        let mut cfg = match self.mode {
+            Mode::Standard => Config::a4(),
+            Mode::Designed => Config::designed_a4(),
+        };
         cfg.family = if self.serif { Family::Serif } else { Family::Sans };
-        let pdf = markdown_to_pdf(&self.src, &cfg);
+        cfg.base_dir = self.base_dir();
+        let pdf = match convert(&self.src, self.kind, &cfg) {
+            Ok(p) => p,
+            Err(e) => {
+                self.status = format!("Export failed: {e}");
+                return;
+            }
+        };
         self.status = match std::fs::write(&out, &pdf) {
             Ok(()) => format!("Exported {} ({} KB)", out.display(), pdf.len() / 1024 + 1),
             Err(e) => format!("Export failed: {e}"),
         };
     }
 
+    fn base_dir(&self) -> Option<PathBuf> {
+        self.path.as_deref().and_then(Path::parent).map(|p| if p.as_os_str().is_empty() { PathBuf::from(".") } else { p.to_path_buf() })
+    }
+
     fn config(&self, width: f32) -> Config {
-        let mut c = Config::a4();
+        let mut c = match self.mode {
+            Mode::Standard => Config::a4(),
+            Mode::Designed => Config::designed_a4(),
+        };
         c.paginate = false;
         c.page_numbers = false;
+        c.header = false;
         c.page_width = width;
         c.margin_left = 32.0;
         c.margin_right = 32.0;
         c.margin_top = 28.0;
         c.margin_bottom = 56.0;
-        c.base_size = 13.0;
+        c.base_size = if self.mode == Mode::Designed { 12.5 } else { 13.0 };
         c.family = if self.serif { Family::Serif } else { Family::Sans };
-        c.theme = if self.dark { Theme::dark() } else { Theme::light() };
+        c.theme = match (self.mode, self.dark) {
+            (Mode::Standard, false) => Theme::light(),
+            (Mode::Standard, true) => Theme::dark(),
+            (Mode::Designed, false) => Theme::designed(),
+            (Mode::Designed, true) => Theme::designed_dark(),
+        };
+        c.base_dir = self.base_dir();
         c
+    }
+
+    /// Lays out the current source; failures (e.g. HTML without opting in) become a notice page.
+    fn build_layout(&self, width: f32) -> Layout {
+        let cfg = self.config(width);
+        render(&self.src, self.kind, &cfg).unwrap_or_else(|e| {
+            let msg = format!("# Cannot render this file\n\n{e}.\n\nChoose **Designed** in the *Mode* dropdown in the toolbar to opt in.");
+            layout(&parse(&msg), &cfg)
+        })
+    }
+
+    fn texture(&mut self, ctx: &egui::Context, lay: &Layout, idx: usize) -> Option<egui::TextureId> {
+        let data = &lay.images[idx];
+        let entry = self.textures.entry(data.uid).or_insert_with(|| {
+            let (w, h) = (data.width as usize, data.height as usize);
+            let color = match &data.pixels {
+                Pixels::Raw { rgb, alpha } => {
+                    let mut rgba = Vec::with_capacity(w * h * 4);
+                    for i in 0..w * h {
+                        rgba.extend_from_slice(&rgb[i * 3..i * 3 + 3]);
+                        rgba.push(alpha.as_ref().map_or(255, |a| a[i]));
+                    }
+                    Some(egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba))
+                }
+                Pixels::Jpeg { data, .. } => image::load_from_memory_with_format(data, image::ImageFormat::Jpeg)
+                    .ok()
+                    .map(|im| {
+                        let im = im.to_rgba8();
+                        egui::ColorImage::from_rgba_unmultiplied([im.width() as usize, im.height() as usize], im.as_raw())
+                    }),
+            };
+            color.map(|c| ctx.load_texture(format!("img{}", data.uid), c, egui::TextureOptions::LINEAR))
+        });
+        entry.as_ref().map(|t| t.id())
     }
 
     fn follow_link(&mut self, ctx: &egui::Context, url: &str) {
@@ -198,6 +266,16 @@ impl eframe::App for App {
                 if ui.button("Open…").clicked() { self.open_dialog(); }
                 if ui.button("Export PDF…").clicked() { self.export_pdf(); }
                 ui.separator();
+                ui.label("Mode");
+                egui::ComboBox::from_id_salt("mode")
+                    .selected_text(self.mode.label())
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.mode, Mode::Standard, Mode::Standard.label());
+                        ui.selectable_value(&mut self.mode, Mode::Designed, Mode::Designed.label());
+                    })
+                    .response
+                    .on_hover_text("Designed (opt-in): renders HTML and CSS, callouts, a refined theme and smart page breaks");
+                ui.separator();
                 if ui.button("−").clicked() { self.zoom /= 1.1; }
                 ui.label(format!("{:.0}%", self.zoom * 100.0));
                 if ui.button("+").clicked() { self.zoom *= 1.1; }
@@ -232,18 +310,19 @@ impl eframe::App for App {
         }
         if jump.is_some() { self.scroll_to = jump; }
 
-        let theme = if self.dark { Theme::dark() } else { Theme::light() };
+        let theme = self.config(800.0).theme;
         let frame = egui::Frame::NONE.fill(col(theme.page_bg));
         let mut clicked_link: Option<String> = None;
         egui::CentralPanel::default().frame(frame).show(ui, |ui| {
             let avail = ui.available_width();
             let doc_w = (avail / self.zoom).clamp(320.0, 880.0);
-            let key = (doc_w.round() as i32, self.dark, self.serif, self.rev);
+            let key = (doc_w.round() as i32, self.dark, self.serif, self.rev, self.mode);
             if self.cache.as_ref().map(|c| c.0) != Some(key) {
-                let lay = layout(&self.doc, &self.config(doc_w));
+                let lay = self.build_layout(doc_w);
                 self.cache = Some((key, lay));
             }
-            let lay = &self.cache.as_ref().unwrap().1;
+            let (ckey, lay_owned) = self.cache.take().unwrap();
+            let lay = &lay_owned;
             let z = self.zoom;
             let mut sa = egui::ScrollArea::vertical().auto_shrink([false, false]);
             if let Some(y) = self.scroll_to.take() {
@@ -258,6 +337,7 @@ impl eframe::App for App {
                 let vis = ui.clip_rect();
                 let pt = |x: f32, y: f32| Pos2::new(ox + x * z, oy + y * z);
                 let pointer = resp.hover_pos();
+                let ctx2 = ui.ctx().clone();
                 for page in &lay.pages {
                     for op in &page.ops {
                         match op {
@@ -298,6 +378,18 @@ impl eframe::App for App {
                                     painter.circle_stroke(c, r * z, Stroke::new(width * z, col(*color)));
                                 }
                             }
+                            Op::Image { x, y, w, h, img } => {
+                                let r = Rect::from_min_size(pt(*x, *y), Vec2::new(w * z, h * z));
+                                if !r.intersects(vis) { continue; }
+                                match self.texture(&ctx2, lay, *img) {
+                                    Some(id) => {
+                                        painter.image(id, r, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+                                    }
+                                    None => {
+                                        painter.rect_stroke(r, 0.0, Stroke::new(1.0, Color32::GRAY), StrokeKind::Middle);
+                                    }
+                                }
+                            }
                             Op::Link { x, y, w, h, url } => {
                                 let r = Rect::from_min_size(pt(*x, *y), Vec2::new(w * z, h * z));
                                 if pointer.is_some_and(|p| r.contains(p)) {
@@ -310,6 +402,7 @@ impl eframe::App for App {
                     }
                 }
             });
+            self.cache = Some((ckey, lay_owned));
         });
         if let Some(u) = clicked_link {
             self.follow_link(&ctx, &u);
@@ -318,10 +411,19 @@ impl eframe::App for App {
 }
 
 fn main() -> eframe::Result {
-    let path = std::env::args().nth(1).map(PathBuf::from);
+    let mut path = None;
+    let mut mode = Mode::Standard;
+    let mut args = std::env::args().skip(1);
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "--mode" => mode = if args.next().as_deref() == Some("designed") { Mode::Designed } else { Mode::Standard },
+            "--designed" => mode = Mode::Designed,
+            _ => path = Some(PathBuf::from(a)),
+        }
+    }
     let opts = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([1100.0, 800.0]).with_title("mdview").with_drag_and_drop(true),
         ..Default::default()
     };
-    eframe::run_native("mdview", opts, Box::new(move |cc| Ok(Box::new(App::new(cc, path)))))
+    eframe::run_native("mdview", opts, Box::new(move |cc| Ok(Box::new(App::new(cc, path, mode)))))
 }
