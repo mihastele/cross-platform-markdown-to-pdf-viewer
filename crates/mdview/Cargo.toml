@@ -1,0 +1,11 @@
+[package]
+name = "mdview"
+description = "Cross-platform Markdown viewer rendering the mdpdf-core layout directly"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mdpdf-core = { path = "../mdpdf-core" }
+eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts", "x11", "wayland"] }
+rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "async-std"] }

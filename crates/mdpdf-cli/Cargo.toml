@@ -1,0 +1,9 @@
+[package]
+name = "mdpdf"
+description = "Convert Markdown straight to PDF (no HTML or other intermediate step)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mdpdf-core = { path = "../mdpdf-core" }
