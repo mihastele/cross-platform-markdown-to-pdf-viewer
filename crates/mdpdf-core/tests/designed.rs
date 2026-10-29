@@ -2,7 +2,7 @@ use mdpdf_core::ast::{Align, Block, Inline};
 use mdpdf_core::{convert, layout, parse_source, render, Config, Layout, Op, Source};
 
 fn designed() -> Config {
-    let mut c = Config::designed_a4();
+    let mut c = Config::designed_builtin_a4();
     c.base_dir = Some(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures").into());
     c
 }
@@ -239,7 +239,7 @@ fn nothing_is_drawn_below_the_bottom_margin() {
     let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/designed.md")).unwrap();
     let mut c = cfg.clone();
     c.base_dir = Some(concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples").into());
-    let lay = layout(&mdpdf_core::parse_with(&src, &mdpdf_core::ParseOptions { html: true, callouts: true }), &c);
+    let lay = layout(&mdpdf_core::parse_with(&src, &mdpdf_core::ParseOptions { html: true, callouts: true, raw_html: false }), &c);
     for (pi, p) in lay.pages.iter().enumerate() {
         for op in &p.ops {
             let bottom = match op {

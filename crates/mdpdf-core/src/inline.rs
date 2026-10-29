@@ -14,6 +14,8 @@ pub type Refs = HashMap<String, String>;
 pub struct InlineCtx<'a> {
     pub refs: &'a Refs,
     pub html: Option<&'a Sheet>,
+    /// Keep HTML tags verbatim for the browser engine.
+    pub raw_html: bool,
 }
 
 enum Tok {
@@ -153,6 +155,14 @@ fn inline(c: &[char], ctx: &InlineCtx) -> Vec<Inline> {
                 }
             }
             '<' => {
+                if ctx.raw_html {
+                    if let Some((_, n)) = html::parse_tag(&c[i..]) {
+                        flush(&mut buf, &mut toks);
+                        toks.push(Tok::N(Inline::RawHtml(c[i..i + n].iter().collect())));
+                        i += n;
+                        continue;
+                    }
+                }
                 if let Some(sheet) = ctx.html {
                     if let Some((tag, n)) = html::parse_tag(&c[i..]) {
                         match tag {

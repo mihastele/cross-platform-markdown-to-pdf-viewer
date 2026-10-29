@@ -132,6 +132,11 @@ pub struct Config {
     pub header: bool,
     /// Directory that relative image paths resolve against.
     pub base_dir: Option<PathBuf>,
+    /// Designed mode only: render through an external Chromium-based browser
+    /// (full HTML/CSS, never-cut page breaks) instead of the built-in engine.
+    pub browser: bool,
+    /// Browser executable; `None` auto-detects (see `browser::find_browser`).
+    pub browser_path: Option<PathBuf>,
 }
 
 impl Config {
@@ -152,13 +157,22 @@ impl Config {
             leading: 1.4,
             header: false,
             base_dir: None,
+            browser: false,
+            browser_path: None,
         }
     }
     pub fn letter() -> Self {
         Config { page_width: 612.0, page_height: 792.0, ..Config::a4() }
     }
-    /// A4 with the Designed look and smart pagination.
+    /// A4, Designed mode through the browser engine (the default Designed backend).
     pub fn designed_a4() -> Self {
+        Config { browser: true, ..Config::designed_builtin_a4() }
+    }
+    pub fn designed_letter() -> Self {
+        Config { page_width: 612.0, page_height: 792.0, ..Config::designed_a4() }
+    }
+    /// A4, Designed look with the built-in engine and smart pagination (offline, no browser).
+    pub fn designed_builtin_a4() -> Self {
         Config {
             margin_top: 76.0,
             margin_bottom: 72.0,
@@ -172,8 +186,8 @@ impl Config {
             ..Config::a4()
         }
     }
-    pub fn designed_letter() -> Self {
-        Config { page_width: 612.0, page_height: 792.0, ..Config::designed_a4() }
+    pub fn designed_builtin_letter() -> Self {
+        Config { page_width: 612.0, page_height: 792.0, ..Config::designed_builtin_a4() }
     }
 }
 
@@ -417,6 +431,7 @@ fn flatten(inl: &[Inline], st: &Style, out: &mut Vec<Item>, pending: &mut bool, 
                 out.push(Item::Hard);
                 *pending = false;
             }
+            Inline::RawHtml(_) => {}
         }
     }
 }
@@ -876,7 +891,7 @@ impl<'a> Engine<'a> {
                 self.push(Op::Line { x1, y1: y, x2, y2: y, color: c, width: 1.0 });
                 self.y += base * 0.9;
             }
-            Block::HtmlOpen { .. } | Block::HtmlClose { .. } => {}
+            Block::HtmlOpen { .. } | Block::HtmlClose { .. } | Block::RawHtml(_) => {}
         }
     }
 

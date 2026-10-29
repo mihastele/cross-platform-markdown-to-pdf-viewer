@@ -62,6 +62,8 @@ pub enum Inline {
     },
     SoftBreak,
     HardBreak,
+    /// Raw HTML tag kept verbatim (only produced for the browser engine).
+    RawHtml(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,6 +139,8 @@ pub enum Block {
     Div { style: BoxStyle, blocks: Vec<Block> },
     PageBreak,
     Rule,
+    /// Raw HTML block kept verbatim (only produced for the browser engine).
+    RawHtml(String),
     /// Parser-internal: an unbalanced HTML container tag seen in a Markdown
     /// HTML block. Folded into `Div` before parsing returns.
     HtmlOpen { tag: String, style: BoxStyle },
@@ -161,6 +165,7 @@ pub fn plain_text(inlines: &[Inline]) -> String {
             Inline::Styled { content, .. } | Inline::Link { content, .. } => out.push_str(&plain_text(content)),
             Inline::Image { alt, .. } => out.push_str(alt),
             Inline::SoftBreak | Inline::HardBreak => out.push(' '),
+            Inline::RawHtml(_) => {}
         }
     }
     out

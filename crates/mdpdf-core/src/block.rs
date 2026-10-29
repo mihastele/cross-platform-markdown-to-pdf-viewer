@@ -13,17 +13,24 @@ pub struct ParseOptions {
     pub html: bool,
     /// GitHub-style `> [!NOTE]` callouts.
     pub callouts: bool,
+    /// Keep embedded HTML verbatim (as `RawHtml`) for a real HTML engine to render.
+    pub raw_html: bool,
 }
 
 struct Ctx<'a> {
     refs: &'a Refs,
     sheet: Option<&'a Sheet>,
     callouts: bool,
+    raw_html: bool,
 }
 
 impl Ctx<'_> {
+    fn html_on(&self) -> bool {
+        self.sheet.is_some() || self.raw_html
+    }
+
     fn inl(&self, s: &str) -> Vec<Inline> {
-        parse_inlines(s, &InlineCtx { refs: self.refs, html: self.sheet })
+        parse_inlines(s, &InlineCtx { refs: self.refs, html: self.sheet, raw_html: self.raw_html })
     }
 }
 
@@ -38,7 +45,7 @@ pub fn parse_with(src: &str, opts: &ParseOptions) -> Document {
     let lines: Vec<String> = text.split('\n').map(str::to_string).collect();
     let refs = collect_refs(&lines);
     let sheet = opts.html.then(|| Sheet::parse(&html::extract_styles(&text)));
-    let ctx = Ctx { refs: &refs, sheet: sheet.as_ref(), callouts: opts.callouts };
+    let ctx = Ctx { refs: &refs, sheet: sheet.as_ref(), callouts: opts.callouts, raw_html: opts.raw_html };
     let blocks = parse_blocks(&lines, &ctx);
     let title = blocks.iter().find_map(|b| match b {
         Block::Heading { level: 1, content } => Some(plain_text(content)),
@@ -407,7 +414,7 @@ fn parse_blocks(lines: &[String], ctx: &Ctx) -> Vec<Block> {
             out.push(Block::CodeBlock { lang: String::new(), text: body.join("\n") });
             continue;
         }
-        if let (Some(sheet), Some(end)) = (ctx.sheet, html_start(line)) {
+        if let (true, Some(end)) = (ctx.html_on(), html_start(line)) {
             let mut raw = Vec::new();
             match end {
                 HtmlEnd::Blank => {
@@ -441,7 +448,11 @@ fn parse_blocks(lines: &[String], ctx: &Ctx) -> Vec<Block> {
             if squashed == "<!--pagebreak-->" || squashed == "<!--page-break-->" || squashed == "<!--newpage-->" {
                 out.push(Block::PageBreak);
             } else {
-                out.extend(html::parse_fragment(&text, sheet));
+                if ctx.raw_html {
+                    out.push(Block::RawHtml(text));
+                } else if let Some(sheet) = ctx.sheet {
+                    out.extend(html::parse_fragment(&text, sheet));
+                }
             }
             continue;
         }
@@ -465,7 +476,7 @@ fn parse_blocks(lines: &[String], ctx: &Ctx) -> Vec<Block> {
                     inner.push(r.strip_prefix(' ').unwrap_or(r).to_string());
                 } else if !blank(l)
                     && inner.last().is_some_and(|p: &String| !p.trim().is_empty())
-                    && !interrupts_paragraph(l, ctx.sheet.is_some())
+                    && !interrupts_paragraph(l, ctx.html_on())
                 {
                     inner.push(l.clone());
                 } else {
@@ -494,7 +505,7 @@ fn parse_blocks(lines: &[String], ctx: &Ctx) -> Vec<Block> {
                     let cols = aligns.len();
                     let mut rows = Vec::new();
                     i += 2;
-                    while i < lines.len() && !blank(&lines[i]) && !interrupts_paragraph(&lines[i], ctx.sheet.is_some()) {
+                    while i < lines.len() && !blank(&lines[i]) && !interrupts_paragraph(&lines[i], ctx.html_on()) {
                         let mut cells = split_row(&lines[i]);
                         cells.resize(cols, String::new());
                         rows.push(cells.iter().map(|c| ctx.inl(c)).collect());
@@ -529,7 +540,7 @@ fn parse_blocks(lines: &[String], ctx: &Ctx) -> Vec<Block> {
                 i += 1;
                 break;
             }
-            if interrupts_paragraph(l, ctx.sheet.is_some()) {
+            if interrupts_paragraph(l, ctx.html_on()) {
                 break;
             }
             para.push(l.trim_start());
@@ -575,7 +586,7 @@ fn parse_list(lines: &[String], mut i: usize, first: Marker, ctx: &Ctx) -> (Bloc
                 i += 1;
             } else if body.last().is_some_and(|p| !p.trim().is_empty())
                 && list_marker(l).is_none()
-                && !interrupts_paragraph(l, ctx.sheet.is_some())
+                && !interrupts_paragraph(l, ctx.html_on())
                 && !is_hr(l)
             {
                 body.push(l.trim_start().to_string());

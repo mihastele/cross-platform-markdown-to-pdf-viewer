@@ -37,54 +37,70 @@ As a library:
 let pdf = mdpdf_core::markdown_to_pdf(&markdown, &mdpdf_core::Config::a4());
 ```
 
-## Two conversion modes (you opt in)
+## Conversion modes (Designed is opt-in)
 
-| | **Standard** (default) | **Designed** (opt in) |
-|---|---|---|
-| Select | default · `mdpdf --mode standard` | viewer **Mode** dropdown · `mdpdf --mode designed` |
-| Input | Markdown | Markdown **with embedded HTML**, and whole `.html` files |
-| Styling | clean, simple | refined theme, accent colours, styled tables/code/quotes, GitHub `> [!NOTE]` callouts, running header + "Page n of N" footer |
-| CSS | – | supported subset (below) |
-| Page breaks | fills pages top to bottom | **smart pagination** (below) |
+| | **Standard** (default) | **Designed** (opt in) | **Designed, built-in** (opt in) |
+|---|---|---|---|
+| Select | default · `--mode standard` | viewer **Mode** dropdown · `--mode designed` | `--mode designed-builtin` |
+| Engine | our own layout engine | **an installed Chromium-based browser** (Chrome, Edge, Chromium, Brave) | our own engine |
+| Input | Markdown | Markdown **with raw HTML**, and whole `.html` files — full HTML/CSS | same, but only the HTML/CSS subset below |
+| Needs | nothing | a browser (auto-detected) | nothing — works offline |
+| Page breaks | simple | **never cut** (below) | smart pagination (below) |
 
 HTML is never interpreted in Standard mode: `mdpdf page.html` fails with a message telling you to opt in,
-and the viewer shows the same notice until you pick *Designed* in the dropdown.
+and the viewer shows the same notice until you pick a *Designed* entry.
 
 ```bash
-mdpdf --mode designed examples/designed.md -o report.pdf     # Markdown + HTML + callouts
+mdpdf --mode designed examples/designed.md -o report.pdf     # Markdown + HTML + callouts, via the browser
 mdpdf --mode designed examples/report.html -o report.pdf     # a styled HTML document
+mdpdf --mode designed-builtin examples/designed.md           # no browser needed
 mdview --mode designed examples/designed.md
 ```
 
-### Smart pagination (Designed mode)
+### How Designed mode works
 
-The layout engine tries a block, and if it would land badly it rolls back and re-lays it out:
+We don't reinvent an HTML engine here. Markdown is converted to HTML (raw HTML in the Markdown is passed through
+untouched), a page setup plus a refined default theme is added, and the page is printed to PDF by your browser
+in headless mode. The browser's own CSS engine therefore handles whatever the document's HTML/CSS contains;
+what we add is the part browsers get wrong by default: **page transitions**.
 
-- **Headings never end a page.** A heading moves to the next page together with the content after it
-  (paragraph, table, code, list or image), including chains like `h2` followed by `h3`.
-- **No widows or orphans.** Paragraphs never leave a single line alone at the bottom or top of a page (code blocks: 3 lines).
-- **Tables are never cut when they fit on one page.** Tables taller than a page break *only between rows*, repeat
-  the header row on every page, and never leave a lone row on either side. Rows are never split.
-- **Images stay whole** with their caption, and are scaled to fit the page. Callouts, quotes, `<details>` and
-  short list items are kept together when they fit.
-- Explicit control: `<!-- pagebreak -->`, CSS `page-break-before/after: always`, `break-inside: avoid`.
-- No empty trailing page, no horizontal rule stranded at the top of a page.
+- **Headings never end a page**: they move together with the paragraph, table, code block, list or image after them.
+- **No widows or orphans**: paragraphs never leave a lone line at the top or bottom of a page.
+- **Tables** that fit on a page are never split. Taller tables start right after the preceding text and break
+  *only between rows*, repeat their header on every page, and never strand the header or a single row at either end.
+- **Images, figures, code blocks, quotes, callouts, list items and `<details>`** are kept whole when they fit
+  (images are also capped to the page height). Closed `<details>` are opened so their content is not lost in print.
+- Page numbers ("Page n of N"), a running title and bookmarks from the headings; `<!-- pagebreak -->` and CSS
+  `break-before/after` work.
 
-These guarantees are enforced by property-style tests that sweep content across every page-bottom alignment
-(`crates/mdpdf-core/tests/designed.rs`); each was verified to fail when smart pagination is switched off.
+These rules are enforced by tests that print real PDFs with a real browser and sweep content across many
+page-bottom alignments (`crates/mdpdf-core/tests/browser.rs`, reads the PDFs with `pdftotext`). They were
+verified to fail when the print rules are removed. They skip themselves when no browser/`pdftotext` is present.
 
-### HTML and CSS subset
+Browser lookup: `--browser PATH`, then `$MDPDF_BROWSER`, then `PATH` (`google-chrome`, `chromium`, `microsoft-edge`,
+`brave-browser`, `chrome-headless-shell`, …), then the usual install locations on macOS/Windows/Linux. `MDPDF_BROWSER_ARGS`
+adds extra flags and `MDPDF_BROWSER_TIMEOUT` (seconds, default 90) bounds each run. A private profile in a temp dir is
+used each time so a running browser is never disturbed.
 
-No browser engine is involved; HTML and CSS are parsed by `html.rs`/`css.rs` into the same tree Markdown uses.
-Supported: headings, `p`/`div`/`section`/`center`/`details`/`figure`/`blockquote`, lists (nested, checkboxes), `dl`,
-tables (`thead`/`tbody`/`caption`/`colspan`/`align`), `pre`/`code`, `img` (with `width`/`height`), links, `br`/`hr`,
-inline `b i u s sub sup mark kbd small code span font q`. Entities and `<style>` blocks (also inside Markdown),
-`style=""` attributes, classes/ids, descendant selectors, specificity and `var(--custom)` properties.
-CSS properties: `color`, `background`, `text-align`, `font-size/weight/style/family(mono)`, `text-decoration`,
-`margin(-top/-bottom/-left)`, `padding`, `border`, `border-left`, `width`/`height`, `display:none`, page-break properties.
-Not supported: flex/grid/float/positioning, pseudo-classes and `::before`, attribute selectors, `calc()`, web fonts,
-media queries, `rowspan`, forms, SVG/video (shown as an "omitted" note). Markdown inside HTML works for block
-containers such as `<div align="center">` … blank line … `</div>`.
+**Security and privacy.** Documents are untrusted input: a Content-Security-Policy blocks scripts, frames, plugins
+and forms, so JavaScript-generated content is not supported. Remote images and stylesheets *are* fetched by the
+browser (this is what makes real web designs print); use `designed-builtin` if a document must not touch the network.
+The sandbox is on, except when running as root on Linux (e.g. in containers), where Chromium requires `--no-sandbox`.
+
+The viewer's *preview* always uses the built-in engine (it labels itself "preview approximate"); **Export PDF**
+prints with the browser. Use `designed-builtin` when you want preview and PDF to match exactly.
+
+### Built-in Designed engine: smart pagination, HTML and CSS subset
+
+The same guarantees (headings with content, no widows/orphans, tables whole or split between rows with repeated
+header and no stragglers, images and callouts whole) are implemented by the built-in engine, which rolls back and
+re-lays out a block when it would land badly (`crates/mdpdf-core/tests/designed.rs`).
+Its HTML/CSS support is a subset: headings, `p`/`div`/`section`/`center`/`details`/`figure`/`blockquote`, lists, `dl`,
+tables (`caption`/`colspan`/`align`), `pre`, `img`, links, and inline `b i u s sub sup mark kbd small code span font q`;
+`<style>` blocks, `style=""`, classes/ids, descendant selectors, specificity, `var(--x)`; and the properties `color`,
+`background`, `text-align`, `font-*`, `text-decoration`, `margin`, `padding`, `border`, `width`/`height`, `display:none`,
+page-break properties. Not supported: flex/grid/float/positioning, pseudo-classes, attribute selectors, `calc()`,
+web fonts, media queries, `rowspan`, forms, SVG/video. Unlike the browser path it is limited to Western European text.
 
 ## Images
 
@@ -111,10 +127,10 @@ headings, document title, and page numbers.
   embedded. Widths come from the real AFM metrics (`tools/gen_font_metrics.py`). The viewer loads the
   metric-compatible system fonts (Liberation / Arial / Times New Roman / Courier New) so on-screen wrapping matches
   the PDF; without them it falls back to egui's built-in fonts and wrapping may differ slightly.
-- **Characters:** base fonts cover WinAnsi (Western European). A few symbols map to ASCII look-alikes
+- **Characters (built-in engines):** base fonts cover WinAnsi (Western European); the browser path supports any script your system fonts cover. A few symbols map to ASCII look-alikes
   (`→` becomes `->`); anything else, e.g. emoji, CJK, becomes `?`. Embedding TrueType fonts is the next step.
-- A single table row or code line taller than a whole page cannot be split and may overflow the margin.
-- The viewer decodes JPEG for display with the `image` crate (viewer only; the PDF pipeline stays dependency-free);
+- Built-in engine: a single table row or code line taller than a whole page cannot be split and may overflow the margin.
+- The built-in engine's viewer decodes JPEG for display with the `image` crate (viewer only; the PDF pipeline stays dependency-free);
   CMYK JPEGs show as an empty frame on screen but are correct in the PDF.
 - No syntax highlighting, footnotes, math, justified text or hyphenation.
 - The parser follows CommonMark closely but is not a certified implementation.

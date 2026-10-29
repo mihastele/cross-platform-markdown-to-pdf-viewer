@@ -106,12 +106,13 @@ impl App {
         let Some(out) = rfd::FileDialog::new().add_filter("PDF", &["pdf"]).set_file_name(default).save_file() else {
             return;
         };
-        let mut cfg = match self.mode {
-            Mode::Standard => Config::a4(),
-            Mode::Designed => Config::designed_a4(),
-        };
+        let mut cfg = self.mode.config(false);
         cfg.family = if self.serif { Family::Serif } else { Family::Sans };
         cfg.base_dir = self.base_dir();
+        self.status = match self.mode {
+            Mode::Designed => format!("Rendering with {}…", browser_name()),
+            _ => "Rendering…".into(),
+        };
         let pdf = match convert(&self.src, self.kind, &cfg) {
             Ok(p) => p,
             Err(e) => {
@@ -130,9 +131,10 @@ impl App {
     }
 
     fn config(&self, width: f32) -> Config {
+        // The preview always uses the built-in engine; the browser only prints PDFs.
         let mut c = match self.mode {
             Mode::Standard => Config::a4(),
-            Mode::Designed => Config::designed_a4(),
+            Mode::Designed | Mode::DesignedBuiltin => Config::designed_builtin_a4(),
         };
         c.paginate = false;
         c.page_numbers = false;
@@ -142,13 +144,13 @@ impl App {
         c.margin_right = 32.0;
         c.margin_top = 28.0;
         c.margin_bottom = 56.0;
-        c.base_size = if self.mode == Mode::Designed { 12.5 } else { 13.0 };
+        c.base_size = if self.mode == Mode::Standard { 13.0 } else { 12.5 };
         c.family = if self.serif { Family::Serif } else { Family::Sans };
         c.theme = match (self.mode, self.dark) {
             (Mode::Standard, false) => Theme::light(),
             (Mode::Standard, true) => Theme::dark(),
-            (Mode::Designed, false) => Theme::designed(),
-            (Mode::Designed, true) => Theme::designed_dark(),
+            (_, false) => Theme::designed(),
+            (_, true) => Theme::designed_dark(),
         };
         c.base_dir = self.base_dir();
         c
@@ -158,7 +160,7 @@ impl App {
     fn build_layout(&self, width: f32) -> Layout {
         let cfg = self.config(width);
         render(&self.src, self.kind, &cfg).unwrap_or_else(|e| {
-            let msg = format!("# Cannot render this file\n\n{e}.\n\nChoose **Designed** in the *Mode* dropdown in the toolbar to opt in.");
+            let msg = format!("# Cannot render this file\n\n{e}.\n\nChoose a **Designed** entry in the *Mode* dropdown in the toolbar to opt in.");
             layout(&parse(&msg), &cfg)
         })
     }
@@ -211,6 +213,10 @@ impl App {
             self.status = format!("Not opening {url}");
         }
     }
+}
+
+fn browser_name() -> String {
+    mdpdf_core::browser::find_browser(None).map_or_else(|| "no browser found".to_string(), |p| mdpdf_core::browser::browser_label(&p))
 }
 
 fn slug(s: &str) -> String {
@@ -272,9 +278,15 @@ impl eframe::App for App {
                     .show_ui(ui, |ui| {
                         ui.selectable_value(&mut self.mode, Mode::Standard, Mode::Standard.label());
                         ui.selectable_value(&mut self.mode, Mode::Designed, Mode::Designed.label());
+                        ui.selectable_value(&mut self.mode, Mode::DesignedBuiltin, Mode::DesignedBuiltin.label());
                     })
                     .response
-                    .on_hover_text("Designed (opt-in): renders HTML and CSS, callouts, a refined theme and smart page breaks");
+                    .on_hover_text(
+                        "Designed (opt-in): full HTML/CSS through an installed Chromium-based browser, with page breaks that never cut headings, tables, images or code.\nDesigned (built-in): the same look from our own engine; works offline with a smaller HTML/CSS subset.",
+                    );
+                if self.mode == Mode::Designed {
+                    ui.label(egui::RichText::new(format!("PDF via {}; preview approximate", browser_name())).small().weak());
+                }
                 ui.separator();
                 if ui.button("−").clicked() { self.zoom /= 1.1; }
                 ui.label(format!("{:.0}%", self.zoom * 100.0));

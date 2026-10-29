@@ -20,7 +20,18 @@ jobs:
         run: cargo build --release -p mdview
       - name: Smoke test PDF export
         run: cargo run --release -p mdpdf -- examples/showcase.md -o showcase.pdf
-      - name: Smoke test Designed mode
+      - name: Smoke test Designed (built-in) mode
         run: |
-          cargo run --release -p mdpdf -- --mode designed examples/designed.md -o designed.pdf
-          cargo run --release -p mdpdf -- --mode designed examples/report.html -o report.pdf
+          cargo run --release -p mdpdf -- --mode designed-builtin examples/designed.md -o designed.pdf
+          cargo run --release -p mdpdf -- --mode designed-builtin examples/report.html -o report.pdf
+      - name: Install pdftotext (for the browser page-break tests)
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y poppler-utils
+      - name: Page-break tests with a real browser (Chrome is preinstalled on the runner)
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo test -p mdpdf-core --test browser -- --nocapture
+      - name: Smoke test Designed (browser) mode
+        continue-on-error: ${{ matrix.os != 'ubuntu-latest' }}
+        run: |
+          cargo run --release -p mdpdf -- --mode designed examples/designed.md -o designed-browser.pdf
+          cargo run --release -p mdpdf -- --mode designed examples/report.html -o report-browser.pdf

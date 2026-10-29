@@ -1,4 +1,4 @@
-use mdpdf_core::{convert, Config, Family, Mode, Source};
+use mdpdf_core::{convert, Family, Mode, Source};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -11,11 +11,14 @@ USAGE:
 
 OPTIONS:
     -o, --output <file>     Output path (default: input name with .pdf; '-' = stdout)
-        --mode <m>          standard (default) | designed
-                              standard: plain Markdown, simple styling
-                              designed: opt-in. Also renders embedded HTML, .html files and a CSS
-                              subset, GitHub callouts, a refined theme, running header/footer, and
-                              smart pagination (no stranded headings, no split tables, no widows)
+        --mode <m>          standard (default) | designed | designed-builtin
+                              standard: plain Markdown, built-in engine
+                              designed: opt-in. Markdown + embedded HTML + whole .html files are rendered
+                              by an installed Chromium-based browser (Chrome, Edge, Chromium, Brave) with
+                              page-break rules that never cut headings, tables, images or code
+                              designed-builtin: the same look from the built-in engine (offline; supports
+                              a smaller HTML/CSS subset)
+        --browser <path>    Browser executable for designed mode (default: auto-detect, or $MDPDF_BROWSER)
         --html              Treat input as HTML (implied by a .html/.htm extension; needs --mode designed)
         --base-dir <dir>    Where relative image paths resolve (default: the input's directory)
         --page <a4|letter>  Page size (default: a4)
@@ -38,6 +41,7 @@ fn main() -> ExitCode {
     let (mut mode, mut letter, mut html) = (Mode::Standard, false, false);
     let (mut family, mut size, mut margin, mut numbers) = (None, None::<f32>, None::<f32>, true);
     let mut base_dir: Option<PathBuf> = None;
+    let mut browser: Option<PathBuf> = None;
 
     while let Some(a) = args.next() {
         let mut val = |name: &str| args.next().ok_or_else(|| format!("{name} needs a value"));
@@ -52,10 +56,12 @@ fn main() -> ExitCode {
                     mode = match val("--mode")?.to_lowercase().as_str() {
                         "standard" => Mode::Standard,
                         "designed" => Mode::Designed,
-                        m => return Err(format!("unknown mode '{m}' (standard | designed)")),
+                        "designed-builtin" => Mode::DesignedBuiltin,
+                        m => return Err(format!("unknown mode '{m}' (standard | designed | designed-builtin)")),
                     }
                 }
                 "--html" => html = true,
+                "--browser" => browser = Some(PathBuf::from(val("--browser")?)),
                 "--base-dir" => base_dir = Some(PathBuf::from(val("--base-dir")?)),
                 "--page" => match val("--page")?.to_lowercase().as_str() {
                     "a4" => letter = false,
@@ -83,12 +89,8 @@ fn main() -> ExitCode {
     }
     let Some(input) = input else { return fail("no input file") };
 
-    let mut cfg = match (mode, letter) {
-        (Mode::Standard, false) => Config::a4(),
-        (Mode::Standard, true) => Config::letter(),
-        (Mode::Designed, false) => Config::designed_a4(),
-        (Mode::Designed, true) => Config::designed_letter(),
-    };
+    let mut cfg = mode.config(letter);
+    cfg.browser_path = browser;
     if let Some(f) = family {
         cfg.family = f;
     }

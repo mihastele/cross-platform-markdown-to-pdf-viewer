@@ -126,7 +126,7 @@ fn continuous_layout_flows_monotonically_for_every_feature() {
     let ex = concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples");
     for (file, designed) in [("showcase.md", false), ("showcase.md", true), ("designed.md", false), ("designed.md", true)] {
         let src = std::fs::read_to_string(format!("{ex}/{file}")).unwrap();
-        let mut cfg = if designed { Config::designed_a4() } else { Config::a4() };
+        let mut cfg = if designed { Config::designed_builtin_a4() } else { Config::a4() };
         cfg.paginate = false;
         cfg.page_numbers = false;
         cfg.base_dir = Some(ex.into());
