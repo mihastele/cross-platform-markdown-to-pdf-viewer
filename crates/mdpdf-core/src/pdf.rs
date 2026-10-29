@@ -184,10 +184,7 @@ pub fn write_pdf(layout: &Layout) -> Vec<u8> {
     let mut font_ids = Vec::new();
     for &idx in &used {
         let id = o.alloc();
-        let face = [
-            (crate::fonts::Family::Sans, 0), (crate::fonts::Family::Serif, 1), (crate::fonts::Family::Mono, 2),
-        ][idx / 4].0;
-        let f = crate::fonts::Face::new(face, idx % 4 >= 2, idx % 2 == 1);
+        let f = crate::fonts::Face::from_index(idx);
         o.set(
             id,
             format!(

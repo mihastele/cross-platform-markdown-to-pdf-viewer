@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/mdpdf-core", "crates/mdpdf-cli"]
+members = ["crates/mdpdf-core", "crates/mdpdf-cli", "crates/mdview"]
 
 [workspace.package]
 version = "0.1.0"

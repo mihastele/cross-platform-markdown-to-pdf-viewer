@@ -35,6 +35,16 @@ impl Face {
         f * 4 + (self.bold as usize) * 2 + self.italic as usize
     }
 
+    /// Inverse of [`Face::index`].
+    pub fn from_index(i: usize) -> Face {
+        let family = match i / 4 {
+            0 => Family::Sans,
+            1 => Family::Serif,
+            _ => Family::Mono,
+        };
+        Face { family, bold: i % 4 >= 2, italic: i % 2 == 1 }
+    }
+
     pub fn pdf_name(self) -> &'static str {
         const NAMES: [&str; 12] = [
             "Helvetica", "Helvetica-Oblique", "Helvetica-Bold", "Helvetica-BoldOblique",
