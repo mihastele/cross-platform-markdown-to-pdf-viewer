@@ -97,6 +97,13 @@ impl Drop for TempDir {
     }
 }
 
+fn temp_dir() -> Result<TempDir, String> {
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    let dir = TempDir(std::env::temp_dir().join(format!("mdpdf-{}-{nanos}", std::process::id())));
+    std::fs::create_dir_all(&dir.0).map_err(|e| format!("cannot create temp dir: {e}"))?;
+    Ok(dir)
+}
+
 #[cfg(target_os = "linux")]
 fn running_as_root() -> bool {
     std::fs::read_to_string("/proc/self/status")
@@ -113,18 +120,16 @@ fn is_ready(pdf: &Path) -> bool {
     std::fs::read(pdf).is_ok_and(|b| b.starts_with(b"%PDF") && b.windows(5).rev().take(64).any(|w| w == b"%%EOF"))
 }
 
-/// Prints a complete HTML page to PDF bytes.
-pub fn print_pdf(html: &str, cfg: &Config) -> Result<Vec<u8>, String> {
-    let browser = find_browser(cfg.browser_path.as_deref()).ok_or(NOT_FOUND)?;
-    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
-    let dir = TempDir(std::env::temp_dir().join(format!("mdpdf-{}-{nanos}", std::process::id())));
-    std::fs::create_dir_all(&dir.0).map_err(|e| format!("cannot create temp dir: {e}"))?;
-    let (page, out, log) = (dir.0.join("doc.html"), dir.0.join("out.pdf"), dir.0.join("browser.log"));
-    std::fs::write(&page, html).map_err(|e| format!("cannot write temp file: {e}"))?;
+fn timeout_secs() -> u64 {
+    std::env::var("MDPDF_BROWSER_TIMEOUT").ok().and_then(|s| s.parse().ok()).unwrap_or(90)
+}
 
-    let mut cmd = Command::new(&browser);
-    let shell = browser.to_string_lossy().contains("headless-shell");
-    if !shell {
+/// Runs the browser on `dir/doc.html` with `extra` flags and returns once it
+/// exits, or once `ready()` says its output is complete (some builds linger).
+/// The caller's temp dir holds the profile, the log and all outputs.
+fn run(browser: &Path, dir: &Path, extra: &[String], stdout: Option<&Path>, ready: &dyn Fn() -> bool) -> Result<(), String> {
+    let mut cmd = Command::new(browser);
+    if !browser.to_string_lossy().contains("headless-shell") {
         cmd.arg("--headless=new");
     }
     cmd.args([
@@ -135,59 +140,91 @@ pub fn print_pdf(html: &str, cfg: &Config) -> Result<Vec<u8>, String> {
         "--disable-extensions",
         "--hide-scrollbars",
         "--allow-file-access-from-files",
-        "--no-pdf-header-footer",
-        "--print-to-pdf-no-header",
-        "--generate-pdf-document-outline",
-        "--run-all-compositor-stages-before-draw",
     ]);
     if running_as_root() {
         cmd.arg("--no-sandbox"); // Chromium refuses to start as root otherwise
     }
-    if let Ok(extra) = std::env::var("MDPDF_BROWSER_ARGS") {
-        cmd.args(extra.split_whitespace());
+    if let Ok(more) = std::env::var("MDPDF_BROWSER_ARGS") {
+        cmd.args(more.split_whitespace());
     }
-    cmd.arg(format!("--user-data-dir={}", dir.0.join("profile").display()))
-        .arg(format!("--print-to-pdf={}", out.display()))
-        .arg(dir_url(&dir.0).trim_end_matches('/').to_string() + "/doc.html")
+    cmd.args(extra)
+        .arg(format!("--user-data-dir={}", dir.join("profile").display()))
+        .arg(dir_url(dir).trim_end_matches('/').to_string() + "/doc.html")
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(std::fs::File::create(&log).map_or_else(|_| Stdio::null(), Stdio::from));
+        .stdout(stdout.and_then(|p| std::fs::File::create(p).ok()).map_or_else(Stdio::null, Stdio::from))
+        .stderr(std::fs::File::create(dir.join("browser.log")).map_or_else(|_| Stdio::null(), Stdio::from));
     let mut child = cmd.spawn().map_err(|e| format!("cannot start {}: {e}", browser.display()))?;
-
-    let timeout = std::env::var("MDPDF_BROWSER_TIMEOUT").ok().and_then(|s| s.parse().ok()).unwrap_or(90);
-    let deadline = Instant::now() + Duration::from_secs(timeout);
+    let secs = timeout_secs();
+    let deadline = Instant::now() + Duration::from_secs(secs);
     loop {
         match child.try_wait() {
-            Ok(Some(_)) => break,
+            Ok(Some(_)) => return Ok(()),
             Ok(None) => {}
             Err(e) => return Err(format!("waiting for browser failed: {e}")),
         }
-        // Some browser builds finish the PDF but linger; accept a complete file.
-        if is_ready(&out) {
+        if ready() {
             std::thread::sleep(Duration::from_millis(150));
             let _ = child.kill();
             let _ = child.wait();
-            break;
+            return Ok(());
         }
         if Instant::now() > deadline {
             let _ = child.kill();
             let _ = child.wait();
             return Err(format!(
-                "{} did not produce a PDF within {timeout}s (is another instance blocking it? set MDPDF_BROWSER_TIMEOUT to wait longer)",
-                browser_label(&browser)
+                "{} did not finish within {secs}s (is another instance blocking it? set MDPDF_BROWSER_TIMEOUT to wait longer)",
+                browser_label(browser)
             ));
         }
         std::thread::sleep(Duration::from_millis(40));
     }
+}
+
+/// Prints a complete HTML page to PDF bytes.
+pub fn print_pdf(html: &str, cfg: &Config) -> Result<Vec<u8>, String> {
+    let browser = find_browser(cfg.browser_path.as_deref()).ok_or(NOT_FOUND)?;
+    let dir = temp_dir()?;
+    let out = dir.0.join("out.pdf");
+    std::fs::write(dir.0.join("doc.html"), html).map_err(|e| format!("cannot write temp file: {e}"))?;
+    let extra = vec![
+        "--no-pdf-header-footer".to_string(),
+        "--print-to-pdf-no-header".to_string(),
+        "--generate-pdf-document-outline".to_string(),
+        "--run-all-compositor-stages-before-draw".to_string(),
+        format!("--print-to-pdf={}", out.display()),
+    ];
+    run(&browser, &dir.0, &extra, None, &|| is_ready(&out))?;
     match std::fs::read(&out) {
         Ok(b) if b.starts_with(b"%PDF") => Ok(b),
         _ => {
-            let log = std::fs::read_to_string(&log).unwrap_or_default();
+            let log = std::fs::read_to_string(dir.0.join("browser.log")).unwrap_or_default();
             let tail: Vec<&str> = log.lines().filter(|l| !l.contains("dbus") && !l.trim().is_empty()).collect();
             let tail = tail[tail.len().saturating_sub(4)..].join("\n");
             Err(format!("{} failed to print the document.\n{tail}", browser_label(&browser)))
         }
     }
+}
+
+/// Lays the page out in the browser (screen media, `width_px` wide) and returns
+/// the indices (document order) of the tables taller than `max_height_px`.
+/// `html` must contain the measuring script allowed by its CSP nonce.
+/// Returns `None` if the browser or script did not report; callers then fall back to estimates.
+pub fn measure_tall_tables(html: &str, cfg: &Config, width_px: f32) -> Option<Vec<usize>> {
+    let browser = find_browser(cfg.browser_path.as_deref())?;
+    let dir = temp_dir().ok()?;
+    std::fs::write(dir.0.join("doc.html"), html).ok()?;
+    let dump = dir.0.join("dom.html");
+    let extra = vec![
+        "--dump-dom".to_string(),
+        format!("--window-size={},2400", width_px.round() as i64),
+        "--virtual-time-budget=4000".to_string(),
+    ];
+    let done = || std::fs::read_to_string(&dump).is_ok_and(|d| d.contains("</html>"));
+    run(&browser, &dir.0, &extra, Some(&dump), &done).ok()?;
+    let dom = std::fs::read_to_string(&dump).ok()?;
+    let at = dom.find("data-mdpdf-tall=\"")? + "data-mdpdf-tall=\"".len();
+    let list = &dom[at..at + dom[at..].find('"')?];
+    Some(list.split(',').filter_map(|n| n.trim().parse().ok()).collect())
 }
 
 #[cfg(test)]

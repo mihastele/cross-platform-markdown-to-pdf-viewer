@@ -66,7 +66,8 @@ what we add is the part browsers get wrong by default: **page transitions**.
 
 - **Headings never end a page**: they move together with the paragraph, table, code block, list or image after them.
 - **No widows or orphans**: paragraphs never leave a lone line at the top or bottom of a page.
-- **Tables** that fit on a page are never split. Taller tables start right after the preceding text and break
+- **Tables** that fit on a page are never split: the browser *measures* every table in a first pass (a script allowed
+  only by a one-time CSP nonce), so this does not rely on guessing. Taller tables start right after the preceding text and break
   *only between rows*, repeat their header on every page, and never strand the header or a single row at either end.
 - **Images, figures, code blocks, quotes, callouts, list items and `<details>`** are kept whole when they fit
   (images are also capped to the page height). Closed `<details>` are opened so their content is not lost in print.
@@ -76,6 +77,9 @@ what we add is the part browsers get wrong by default: **page transitions**.
 These rules are enforced by tests that print real PDFs with a real browser and sweep content across many
 page-bottom alignments (`crates/mdpdf-core/tests/browser.rs`, reads the PDFs with `pdftotext`). They were
 verified to fail when the print rules are removed. They skip themselves when no browser/`pdftotext` is present.
+
+The measuring pass costs one extra browser launch (~0.3 s) and only runs for documents that contain tables; if it fails
+we fall back to a size estimate.
 
 Browser lookup: `--browser PATH`, then `$MDPDF_BROWSER`, then `PATH` (`google-chrome`, `chromium`, `microsoft-edge`,
 `brave-browser`, `chrome-headless-shell`, …), then the usual install locations on macOS/Windows/Linux. `MDPDF_BROWSER_ARGS`

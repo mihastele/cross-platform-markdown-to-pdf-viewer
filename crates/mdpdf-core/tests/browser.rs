@@ -242,3 +242,40 @@ fn explicit_page_breaks_and_markdown_in_html_blocks() {
     assert_eq!(ps.len(), 2, "{ps:?}");
     assert!(ps[0].contains("centered") && ps[1].contains("Second page"));
 }
+
+/// A table that *fits* a page must never be split, even when a size guess would
+/// call it tall: the browser measures it. Here compact CSS makes 50 rows only
+/// ~450pt tall, but a row-count estimate would say ~1300pt.
+#[test]
+fn tables_that_fit_are_measured_not_guessed() {
+    if !available() {
+        return;
+    }
+    let mut table = String::from("| A | B |\n|---|---|\n");
+    for i in 0..50 {
+        table.push_str(&format!("| row{i} | v |\n"));
+    }
+    let cases: Vec<usize> = (10..22).collect();
+    let results = par(&cases, |&fillers| {
+        let src = format!("<style>td,th{{padding:0 !important;line-height:1 !important;font-size:9pt}}</style>\n\n{}{table}", prefix(fillers, 0));
+        let ps = pages(&src, Source::Markdown);
+        let with_rows: Vec<usize> = (0..ps.len()).filter(|&p| ps[p].contains("row")).collect();
+        (with_rows, fillers)
+    });
+    for (pages_with_rows, f) in &results {
+        assert_eq!(pages_with_rows.len(), 1, "fillers={f}: a table that fits one page was split over {pages_with_rows:?}");
+    }
+    assert!(results.iter().any(|r| r.0[0] > 0), "some case must move the table to a later page");
+}
+
+/// Tables taller than a page must still be allowed to split (and repeat their header).
+#[test]
+fn tables_taller_than_a_page_still_split_after_measuring() {
+    if !available() {
+        return;
+    }
+    let ps = pages(&format!("Intro text.\n\n{}", table_src(120)), Source::Markdown);
+    let with_rows = (0..ps.len()).filter(|&p| ps[p].contains("row")).count();
+    assert!(with_rows >= 2, "{with_rows}");
+    assert!(ps[0].contains("Intro text.") && ps[0].contains("row0"), "a tall table starts right after the text, without a gap");
+}

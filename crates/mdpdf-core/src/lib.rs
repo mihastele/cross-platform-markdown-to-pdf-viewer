@@ -94,14 +94,29 @@ pub fn render(src: &str, kind: Source, cfg: &Config) -> Result<Layout, String> {
 }
 
 /// Source -> PDF through the external browser (Designed mode).
+///
+/// Which tables are taller than a page is *measured* by the browser in a
+/// first pass (so tables that fit are never split); if that pass fails we
+/// fall back to a size estimate.
 fn browser_convert(src: &str, kind: Source, cfg: &Config) -> Result<Vec<u8>, String> {
     let base = cfg.base_dir.as_deref().and_then(|d| d.canonicalize().ok()).map(|d| browser::dir_url(&d));
-    let page = match kind {
+    let build = |estimate: bool| match kind {
         Source::Markdown => {
             let doc = parse_with(src, &ParseOptions { html: false, callouts: true, raw_html: true });
-            html_out::markdown_page(&doc, cfg, base.as_deref())
+            html_out::markdown_page_opts(&doc, cfg, base.as_deref(), estimate)
         }
-        Source::Html => html_out::html_page(src, cfg, base.as_deref()),
+        Source::Html => html_out::html_page_opts(src, cfg, base.as_deref(), estimate),
+    };
+    let plain = build(false);
+    let has_tables = plain.to_ascii_lowercase().contains("<table");
+    let page = if has_tables {
+        let probe = html_out::with_measure_script(&plain, cfg);
+        match browser::measure_tall_tables(&probe, cfg, html_out::body_px(cfg).0) {
+            Some(tall) => html_out::mark_tall_by_index(&plain, &tall),
+            None => build(true),
+        }
+    } else {
+        plain
     };
     browser::print_pdf(&page, cfg)
 }

@@ -404,16 +404,66 @@ pub fn mark_tall_tables(html: &str, cfg: &Config) -> String {
     out
 }
 
+/// Page-body size in CSS pixels (what a table must fit into).
+pub fn body_px(cfg: &Config) -> (f32, f32) {
+    let px = 96.0 / 72.0;
+    ((cfg.page_width - cfg.margin_left - cfg.margin_right) * px, (cfg.page_height - cfg.margin_top - cfg.margin_bottom) * px)
+}
+
+/// The same page with a measuring script (allowed by a CSP nonce; the
+/// document's own scripts stay blocked) that records tables taller than a
+/// page body in `data-mdpdf-tall` on `<html>`.
+pub fn with_measure_script(page: &str, cfg: &Config) -> String {
+    let (w, h) = body_px(cfg);
+    let nonce = format!("{:x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(7, |d| d.as_nanos()));
+    let script = format!(
+        "<style>@media screen {{ html {{ width: {w}px; }} }}</style><script nonce=\"{nonce}\">(function(){{function m(){{var r=[];document.querySelectorAll('table').forEach(function(t,i){{if(t.getBoundingClientRect().height>{h})r.push(i)}});document.documentElement.setAttribute('data-mdpdf-tall',r.join(','))}}if(document.readyState==='complete')m();else addEventListener('load',m)}})();</script>"
+    );
+    let page = page.replacen("script-src 'none'", &format!("script-src 'nonce-{nonce}'"), 1);
+    match page.to_ascii_lowercase().rfind("</body>") {
+        Some(at) => format!("{}{script}{}", &page[..at], &page[at..]),
+        None => format!("{page}{script}"),
+    }
+}
+
+/// Marks the tables at `indices` (document order) as taller than a page.
+pub fn mark_tall_by_index(page: &str, indices: &[usize]) -> String {
+    let lower = page.to_ascii_lowercase();
+    let mut out = String::with_capacity(page.len() + 16 * indices.len());
+    let (mut last, mut from, mut n) = (0, 0, 0);
+    while let Some(rel) = lower[from..].find("<table") {
+        let after = from + rel + "<table".len();
+        from = after;
+        if !lower[after..].chars().next().is_some_and(|c| c.is_whitespace() || c == '>') {
+            continue;
+        }
+        if indices.contains(&n) {
+            out.push_str(&page[last..after]);
+            out.push_str(" data-tall");
+            last = after;
+        }
+        n += 1;
+    }
+    out.push_str(&page[last..]);
+    out
+}
+
 /// Complete HTML page for a Markdown document.
 pub fn markdown_page(doc: &Document, cfg: &Config, base_url: Option<&str>) -> String {
+    markdown_page_opts(doc, cfg, base_url, true)
+}
+
+/// `estimate`: guess which tables are taller than a page (see `markdown_page_measured`).
+pub fn markdown_page_opts(doc: &Document, cfg: &Config, base_url: Option<&str>, estimate: bool) -> String {
     let title = doc.title.as_deref();
+    let geo = estimate.then_some((cfg.page_width - cfg.margin_left - cfg.margin_right, cfg.page_height - cfg.margin_top - cfg.margin_bottom, cfg.base_size));
     format!(
         "<!doctype html>\n<html lang=\"en\"><head>{}<title>{}</title><style>{}{}</style></head>\n<body class=\"mdpdf\">\n{}<style>{}</style>\n</body></html>\n",
         head_snippet(base_url),
         esc(title.unwrap_or("Document")),
         page_css(cfg, title),
         designed_css(cfg),
-        open_details(&body_html_geo(doc, Some((cfg.page_width - cfg.margin_left - cfg.margin_right, cfg.page_height - cfg.margin_top - cfg.margin_bottom, cfg.base_size)))),
+        open_details(&body_html_geo(doc, geo)),
         print_rules(cfg),
     )
 }
@@ -421,10 +471,15 @@ pub fn markdown_page(doc: &Document, cfg: &Config, base_url: Option<&str>) -> St
 /// A user-supplied HTML document: kept as is, with page setup before it and
 /// the print rules after it.
 pub fn html_page(src: &str, cfg: &Config, base_url: Option<&str>) -> String {
+    html_page_opts(src, cfg, base_url, true)
+}
+
+pub fn html_page_opts(src: &str, cfg: &Config, base_url: Option<&str>, estimate: bool) -> String {
     let title = None::<&str>;
     let head_add = format!("{}<style>{}</style>", head_snippet(base_url), page_css(cfg, title));
     let tail_add = format!("<style>{}</style>", print_rules(cfg));
-    let mut out = mark_tall_tables(&open_details(src), cfg);
+    let opened = open_details(src);
+    let mut out = if estimate { mark_tall_tables(&opened, cfg) } else { opened };
     // Head: after the opening <head ...>, else after <html ...>, else prepend.
     let inserted = ["<head", "<html"].iter().find_map(|tag| {
         let at = find_ci(&out, tag)?;
@@ -500,6 +555,18 @@ mod tests {
         assert!(markdown_page(&doc, &cfg, None).contains("<table data-tall>"));
         let small = parse_with("| a |\n|---|\n| 1 |\n", &ParseOptions { html: false, callouts: true, raw_html: true });
         assert!(!markdown_page(&small, &cfg, None).contains("data-tall>"));
+    }
+
+    #[test]
+    fn tables_are_marked_by_document_index() {
+        let page = "<table><tr></tr></table><p><tablet></p><table class=a></table><TABLE></TABLE>";
+        assert_eq!(
+            mark_tall_by_index(page, &[1, 2]),
+            "<table><tr></tr></table><p><tablet></p><table data-tall class=a></table><TABLE data-tall></TABLE>"
+        );
+        let cfg = Config::designed_a4();
+        let m = with_measure_script("<html><head><meta http-equiv=\"Content-Security-Policy\" content=\"script-src 'none'; x\"></head><body></body></html>", &cfg);
+        assert!(m.contains("script-src 'nonce-") && m.contains("data-mdpdf-tall") && !m.contains("script-src 'none'"));
     }
 
     #[test]
